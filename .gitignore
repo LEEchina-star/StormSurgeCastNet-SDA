@@ -1,6 +1,6 @@
 # --- data (shared via symlink, never commit) ---
-Data2/
-DATA_temp/
+Data2
+DATA_temp
 
 # --- caches & results (large, regenerate) ---
 cache_*/
