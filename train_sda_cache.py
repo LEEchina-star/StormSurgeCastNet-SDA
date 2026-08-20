@@ -103,6 +103,14 @@ def main():
     for p in ema.parameters(): p.requires_grad_(False)
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=config.gamma)
+    start_epoch = 1
+    last_ckpt = os.path.join(config.out, "last.pth.tar")
+    if os.path.isfile(last_ckpt):
+        ck = torch.load(last_ckpt, map_location=device)
+        model.load_state_dict(ck["model"]); ema.load_state_dict(ck["ema"])
+        opt.load_state_dict(ck["opt"])
+        start_epoch = ck["epoch"] + 1
+        print(f"resume from epoch {start_epoch} (last.pth.tar)")
     print(f"TOTAL PARAMS: {utils.get_ntrainparams(model)}")
 
     os.makedirs(config.out, exist_ok=True)
@@ -157,7 +165,7 @@ def main():
 
     # ---- train ----
     best, log = float("inf"), {}
-    for ep in range(1, config.epochs + 1):
+    for ep in range(start_epoch, config.epochs + 1):
         model.train(); t0 = time.time(); losses = []
         for X, y, yg, lead in tr_loader:
             losses.append(train_step(X, y, yg, lead))
@@ -168,10 +176,15 @@ def main():
             v = validate()
             msg += f" | CRPS {v['crps']:.4f} | cov {v['coverage']:.3f} | RMSE {v['rmse']:.4f} m"
             log[ep].update(v)
-            if v["crps"] < best:
-                best = v["crps"]
-                torch.save({"epoch": ep, "model": model.state_dict(), "ema": ema.state_dict()},
+            if v["rmse"] < best:
+                best = v["rmse"]
+                torch.save({"epoch": ep, "model": model.state_dict(), "ema": ema.state_dict(),
+                            "opt": opt.state_dict(), "metrics": v},
                            os.path.join(config.out, "best_sda.pth.tar"))
+        # save a resumable checkpoint every epoch (protects against interruption)
+        torch.save({"epoch": ep, "model": model.state_dict(), "ema": ema.state_dict(),
+                    "opt": opt.state_dict(), "train_loss": float(np.mean(losses))},
+                   os.path.join(config.out, "last.pth.tar"))
         print(msg)
         with open(os.path.join(config.out, "trainlog.json"), "w") as f:
             json.dump(log, f, indent=2)

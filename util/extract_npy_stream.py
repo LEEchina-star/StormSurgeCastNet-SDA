@@ -19,13 +19,17 @@ import torch.nn.functional as F
 
 class _Sink:
     """Collects samples into compact shards on disk."""
-    def __init__(self, out_dir, shard=50, resize=0, max_samples=int(1e9)):
+    def __init__(self, out_dir, shard=50, resize=0, max_samples=int(1e9),
+                 lon_min=-999, lon_max=999, lat_min=-999, lat_max=999):
         os.makedirs(out_dir, exist_ok=True)
         self.out_dir, self.shard, self.resize = out_dir, shard, resize
         self.max_samples = max_samples
-        self.buf = []            # list of (X, y, yg, lead, id)
+        self.lon_min, self.lon_max = lon_min, lon_max
+        self.lat_min, self.lat_max = lat_min, lat_max
+        self.buf = []            # list of (X, y, yg, lead, id, lon, lat)
         self.shard_idx = 0
         self.total = 0
+        self.skipped = 0
         self.done = False
 
     def _dump(self):
@@ -36,8 +40,10 @@ class _Sink:
         yg = np.stack([b[2] for b in self.buf]).astype(np.float32)
         lead = np.asarray([b[3] for b in self.buf], np.float32)
         ids = np.asarray([b[4] for b in self.buf], np.int64)
+        lon = np.asarray([b[5] for b in self.buf], np.float32)
+        lat = np.asarray([b[6] for b in self.buf], np.float32)
         path = os.path.join(self.out_dir, f"part_{self.shard_idx:04d}.npz")
-        np.savez(path, X=X, y=y, yg=yg, lead=lead, ids=ids)
+        np.savez(path, X=X, y=y, yg=yg, lead=lead, ids=ids, lon=lon, lat=lat)
         print(f"  shard {self.shard_idx}: {len(self.buf)} samples -> {path} "
               f"({os.path.getsize(path)/1e6:.0f} MB)", flush=True)
         self.shard_idx += 1
@@ -64,7 +70,13 @@ class _Sink:
                                    size=(self.resize, self.resize), mode="nearest")[0].numpy()
             lead = float(np.asarray(inp["td_lead"]).reshape(-1)[0])
             gid = int(np.asarray(tgt["id"]).reshape(-1)[0])
-            self.buf.append((x, y, yg, lead, gid))
+            lon = float(np.asarray(tgt["lon_gauge"]).reshape(-1)[0])
+            lat = float(np.asarray(tgt["lat_gauge"]).reshape(-1)[0])
+            # region filter
+            if not (self.lon_min <= lon <= self.lon_max and self.lat_min <= lat <= self.lat_max):
+                self.skipped += 1
+                return
+            self.buf.append((x, y, yg, lead, gid, lon, lat))
             self.total += 1
             if len(self.buf) >= self.shard:
                 self._dump()
@@ -133,9 +145,14 @@ def main():
     ap.add_argument("--max_samples", type=int, default=int(1e9))
     ap.add_argument("--shard", type=int, default=50)
     ap.add_argument("--resize", type=int, default=0)
+    ap.add_argument("--lon_min", type=float, default=-999)
+    ap.add_argument("--lon_max", type=float, default=999)
+    ap.add_argument("--lat_min", type=float, default=-999)
+    ap.add_argument("--lat_max", type=float, default=999)
     args = ap.parse_args()
 
-    sink = _Sink(args.out, shard=args.shard, resize=args.resize, max_samples=args.max_samples)
+    sink = _Sink(args.out, shard=args.shard, resize=args.resize, max_samples=args.max_samples,
+                 lon_min=args.lon_min, lon_max=args.lon_max, lat_min=args.lat_min, lat_max=args.lat_max)
     with open(args.src, "rb") as f:
         # skip the numpy header (v1.0 .npy: magic(6) + version(2) + hdrlen(2) + header)
         import struct
@@ -150,7 +167,7 @@ def main():
         except Exception as e:
             print("unpickle finished/stopped:", type(e).__name__, str(e)[:100], flush=True)
     sink._dump()  # flush remainder
-    print(f"DONE. {sink.total} samples streamed -> {args.out}", flush=True)
+    print(f"DONE. {sink.total} samples streamed (skipped {sink.skipped} out of region) -> {args.out}", flush=True)
 
 
 if __name__ == "__main__":
