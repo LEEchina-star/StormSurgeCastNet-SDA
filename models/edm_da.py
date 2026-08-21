@@ -143,6 +143,13 @@ class ContextEncoder(nn.Module):
     Shared 2D conv encoder over the time dimension, followed by a lightweight
     temporal attention (learned query) aggregating T -> single frame, producing
     per-UNet-level channel-wise scale/shift for FiLM conditioning.
+
+    NEW (fix): a DEDICATED sparse in-situ path. Channel 0 (rasterised gauges) and
+    channel 1 (validity mask) are summarised per frame by max/mean over valid
+    pixels, encoded by an MLP and temporally pooled, then injected as an
+    additional per-level FiLM term. This prevents the sparse signal (only a few
+    dozen non-zero pixels per frame) from being washed out by global average
+    pooling in the main conv path.
     """
     def __init__(self, in_c, dim, levels, emb_dim):
         super().__init__()
@@ -151,6 +158,7 @@ class ContextEncoder(nn.Module):
         self.enc = nn.ModuleList()
         self.attn = nn.ModuleList()
         self.heads = nn.ModuleList()
+        self.sparse_head = nn.ModuleList()
         cur = dim
         for lv in range(levels):
             out_c = dim * (2 ** lv)
@@ -160,15 +168,52 @@ class ContextEncoder(nn.Module):
                 nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(out_c, out_c), nn.SiLU()
             ))
             # per-scale FiLM params from pooled context
-            self.heads.append(nn.Linear(out_c, out_c * 2))
+            # input = cat[avg, max]: global mean alone dilutes spatial structure
+            # (GTSM/ERA5 surge peaks), so we append the spatial maximum to keep it.
+            self.heads.append(nn.Linear(out_c * 2, out_c * 2))
+            # sparse-path FiLM for this level
+            self.sparse_head.append(nn.Linear(dim, out_c * 2))
             cur = out_c
         # per-level learned temporal query (dim matches level channels)
         self.temporal_query = nn.ParameterList(
             [nn.Parameter(torch.randn(dim * (2 ** lv))) for lv in range(levels)])
+        # sparse gauge time-series encoder: per-frame (max, mean) -> dim
+        self.sparse_mlp = nn.Sequential(nn.Linear(2, dim), nn.SiLU(), nn.Linear(dim, dim))
+        # NEW (spatial conditioning): temporal aggregation of the RAW context
+        # field. Global pooling (avg/avg+max) throws away WHERE the surge is;
+        # the denoiser must see the GTSM/ERA5/sparse fields spatially, so we
+        # learn frame weights and produce a full-res aggregated context map
+        # [B, C, H, W] that is concatenated into the denoiser input.
+        self.temp_pool = nn.Sequential(nn.Linear(in_c, dim), nn.SiLU(), nn.Linear(dim, 1))
+
+    def _agg_raw(self, c):
+        """Temporally aggregate the raw context [B,T,C,H,W] -> [B,C,H,W]
+        with learned per-frame weights (softmax over time)."""
+        b, t, ch, h, w = c.shape
+        pool = c.mean(dim=(3, 4))                     # [B,T,C] per-frame global stats
+        scores = self.temp_pool(pool).squeeze(-1)     # [B,T]
+        w = scores.softmax(dim=1)                     # [B,T]
+        return torch.einsum("b t c h w, b t -> b c h w", c, w)
+
+    def _sparse_film(self, c, lv):
+        """Summarise the sparse gauge channel + validity mask -> (s, sh) [B, C_lv]."""
+        b, t, ch, h, w = c.shape
+        sp = c[:, :, 0:1]                                   # [B,T,1,H,W] gauge values
+        vmask = c[:, :, 1:2].clamp(0, 1)                    # [B,T,1,H,W] validity
+        spm = sp * vmask
+        mx = spm.amax(dim=(3, 4))                           # max over space (keeps gauge peaks)
+        cnt = vmask.sum(dim=(3, 4)).clamp(min=1.0)
+        mn = spm.sum(dim=(3, 4)) / cnt                      # mean over valid pixels
+        feat = torch.cat([mx, mn], dim=-1)                  # [B,T,2]
+        feat = self.sparse_mlp(feat)                        # [B,T,dim]
+        agg = feat.mean(dim=1)                              # [B,dim] temporal mean
+        s, sh = self.sparse_head[lv](agg).chunk(2, dim=1)   # [B, C_lv]
+        return s, sh
 
     def forward(self, c, t_emb=None):
         """
-        c: [B, T, C, H, W]  -> returns list over levels of (scale, shift) [B, C_lv]
+        c: [B, T, C, H, W] -> (list over levels of (scale, shift) [B, C_lv],
+                               raw aggregated context map [B, C, H, W])
         """
         b, t, ch, h, w = c.shape
         x = c.reshape(b * t, ch, h, w)
@@ -183,9 +228,14 @@ class ContextEncoder(nn.Module):
             # temporal weighted average (per-channel, spatial broadcast)
             feat = x.reshape(b, t, *x.shape[1:])             # [B,T,C,H,W]
             agg = torch.einsum("b t c h w, b t -> b c h w", feat, scores)
-            s, sh = self.heads[lv](agg.mean(dim=(2, 3))).chunk(2, dim=1)  # [B, C_lv]
-            ctxs.append((s, sh))
-        return ctxs
+            # cat[avg, max] pooling: preserves spatial peaks (GTSM surge structure,
+            # pressure troughs) that global mean averaging washes out.
+            pooled = torch.cat([agg.mean(dim=(2, 3)),
+                                agg.amax(dim=(2, 3))], dim=1)          # [B, 2*C_lv]
+            s, sh = self.heads[lv](pooled).chunk(2, dim=1)             # [B, C_lv]
+            s_sp, sh_sp = self._sparse_film(c, lv)           # sparse in-situ contribution
+            ctxs.append((s + s_sp, sh + sh_sp))
+        return ctxs, self._agg_raw(c)
 
 
 # --------------------------------------------------------------------------
@@ -290,7 +340,10 @@ class EDMDataAssimilation(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        in_ch   = getattr(config, "diff_in_ch", 1)          # noisy surge channel
+        cond_in = getattr(config, "in_dim", 6)
+        # denoiser input = noisy surge + RAW time-aggregated context field
+        # (spatial conditioning: GTSM/ERA5/sparse structure stays visible)
+        in_ch   = getattr(config, "diff_in_ch", 1) + cond_in
         out_ch  = getattr(config, "diff_out_ch", 1)
         dim     = getattr(config, "diff_dim", 64)
         levels  = getattr(config, "diff_levels", 3)
@@ -307,7 +360,7 @@ class EDMDataAssimilation(nn.Module):
 
     # ---------------------------------------------------------- conditioning
     def _ctx(self, c, lead):
-        """c: [B,T,C,H,W] -> per-level FiLM params; t_emb from lead for encoder blocks"""
+        """c: [B,T,C,H,W] -> (per-level FiLM params, raw aggregated context map)"""
         emb = torch.zeros(c.shape[0], device=c.device)
         return self.context_encoder(c, emb)
 
@@ -317,12 +370,15 @@ class EDMDataAssimilation(nn.Module):
         x_t: [B, C, H, W] noisy target
         returns D_theta (estimate of clean x0), [B, C, H, W]
         """
-        ctx = self._ctx(c, lead)
+        ctxs, c_agg = self._ctx(c, lead)
         c_in = 1.0 / torch.sqrt(sigma ** 2 + self.sigma_data ** 2)
         c_out = sigma * self.sigma_data / torch.sqrt(self.sigma_data ** 2 + sigma ** 2)
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
+        # EDM preconditioning applies to the noisy image ONLY; the aggregated
+        # context is clean conditioning and enters the denoiser unscaled.
+        x_in = torch.cat([x_t * c_in.view(-1, 1, 1, 1), c_agg], dim=1)
         # official EDM time conditioning: c_noise = log(sigma)/4 (Karras et al. 2022)
-        F_in = self.denoiser(x_t * c_in.view(-1, 1, 1, 1), sigma.log() / 4, lead, ctx)
+        F_in = self.denoiser(x_in, sigma.log() / 4, lead, ctxs)
         return c_skip.view(-1, 1, 1, 1) * x_t + c_out.view(-1, 1, 1, 1) * F_in
 
     # ---------------------------------------------------------- training loss
