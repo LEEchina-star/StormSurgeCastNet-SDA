@@ -1,5 +1,17 @@
 # StormSurgeCastNet-SDA —— RTX A6000 (Windows/CUDA) 适配版
 
+> ## 0. 在线获取（无需手动拷数据）
+> 本文件夹已同步到 GitHub：`github.com/LEEchina-star/StormSurgeCastNet-SDA`（目录 `A6000_code/`）。
+> 新机器上只需两样东西，用 `download_data_a6000.py` 一键下载（自动校验 SHA256）：
+> ```
+> python download_data_a6000.py --code-only     # 代码（GitHub，已在线）
+> python download_data_a6000.py --models <Release资产直链>   # 模型权重（上传后）
+> python download_data_a6000.py --caches --zenodo <记录ID>  # 训练缓存（上传 Zenodo 后）
+> python download_data_a6000.py --verify        # 完整性校验
+> ```
+> 待上传的两样（见 UPLOAD_CHECKLIST.md）：① 缓存 ~29GB → Zenodo（免费 50GB/数据集）；② 模型权重 → GitHub Release。
+>
+
 本目录由 Mac (MPS) 版本移植：**设备自动选择 CUDA 优先**（RTX A6000），回退 MPS/CPU。
 与原版唯一差异在设备处理与 A6000 加速选项，**训练协议（float32、batch 4、256x256、30 epochs）与论文一致**。
 
