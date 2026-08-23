@@ -109,6 +109,8 @@ def main():
         ck = torch.load(last_ckpt, map_location=device)
         model.load_state_dict(ck["model"]); ema.load_state_dict(ck["ema"])
         opt.load_state_dict(ck["opt"])
+        if "sched" in ck:
+            sched.load_state_dict(ck["sched"])
         start_epoch = ck["epoch"] + 1
         print(f"resume from epoch {start_epoch} (last.pth.tar)")
     print(f"TOTAL PARAMS: {utils.get_ntrainparams(model)}")
@@ -179,11 +181,12 @@ def main():
             if v["rmse"] < best:
                 best = v["rmse"]
                 torch.save({"epoch": ep, "model": model.state_dict(), "ema": ema.state_dict(),
-                            "opt": opt.state_dict(), "metrics": v},
+                            "opt": opt.state_dict(), "sched": sched.state_dict(), "metrics": v},
                            os.path.join(config.out, "best_sda.pth.tar"))
         # save a resumable checkpoint every epoch (protects against interruption)
         torch.save({"epoch": ep, "model": model.state_dict(), "ema": ema.state_dict(),
-                    "opt": opt.state_dict(), "train_loss": float(np.mean(losses))},
+                    "opt": opt.state_dict(), "sched": sched.state_dict(),
+                    "train_loss": float(np.mean(losses))},
                    os.path.join(config.out, "last.pth.tar"))
         print(msg)
         with open(os.path.join(config.out, "trainlog.json"), "w") as f:
