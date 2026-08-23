@@ -1,0 +1,34 @@
+# --- data (shared via symlink, never commit) ---
+Data2
+DATA_temp
+
+# --- caches & results (large, regenerate) ---
+cache_*/
+results*/
+results_sda/
+wandb/
+inference/
+
+# --- intermediates & notes ---
+temp/
+*.pth.tar
+*.npy
+*.nc
+*.tif
+
+# --- python ---
+__pycache__/
+*.pyc
+
+# --- media & archives ---
+assets/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.zip
+*.pth
+
+# --- macOS ---
+.DS_Store
+._*
