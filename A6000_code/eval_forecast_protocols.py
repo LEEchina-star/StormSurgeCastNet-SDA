@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Realistic-forecast protocols on the 45 held-out gauges (SDA-256, batch=4):
   * prior          : no assimilation                     (pure generation)
-  * assim_current  : assimilate the CURRENT obs (last input frame X[:,-1,0])   [Option C]
+  * assim_window    : assimilate the full past-12h obs window (per-gauge mean)  [realistic]
   * assim_future   : assimilate the TARGET-time obs y    (the previous "cheat")
   * densification  : remove target history from input + no assimilation        [E2]
 All MAE in METRES at the target gauge pixel."""
@@ -40,12 +40,14 @@ def run(c_override=None, y_in=None, mask_in=None):
         pred[i:i+4]=o["mean"].cpu()[:,0]
     return pred
 
-# current-obs mask & values: target pixel, value = last input frame (issue-time obs)
+# 12h-WINDOW assimilation: full past-12h obs series -> per-gauge window mean
+sp=X[:,:,0]; vm=X[:,:,1].clamp(0,1)
 cur=torch.full(y.shape, float("nan"))
 for i in range(B):
-    oy,ox=np.where(~np.isnan(y[i,0]))
+    oy,ox=torch.where(~torch.isnan(y[i,0]))
     for (a,b) in zip(oy,ox):
-        cur[i,0,a,b]=X[i,-1,0,a,b]     # current observation at t0
+        vals=sp[i,:,a,b][vm[i,:,a,b]>0]
+        if vals.numel(): cur[i,0,a,b]=vals.mean()
 mask_c=(~torch.isnan(cur)).float()
 
 t0=time.time()
@@ -69,7 +71,7 @@ def mae(pred):
 
 print("\n=== SDA-Diff 256 — forecast protocols (45 held-out gauges, metres) ===")
 print(f"  prior (no assim)        : {mae(p_pri):.4f} m")
-print(f"  assim CURRENT obs [C]   : {mae(p_cur):.4f} m   <- realistic forecast")
+print(f"  assim WINDOW obs (12h)  : {mae(p_cur):.4f} m   <- realistic forecast")
 print(f"  assim FUTURE obs (old)  : {mae(p_fut):.4f} m   <- previous 'cheat'")
 print(f"  densification (E2)      : {mae(p_den):.4f} m")
 np.savez("temp/figures/protocols.npz", p_pri=p_pri,p_cur=p_cur,p_fut=p_fut,p_den=p_den)

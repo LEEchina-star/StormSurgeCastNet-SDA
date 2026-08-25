@@ -73,8 +73,18 @@ def main():
         yr = F.interpolate(y.reshape(B, 1, H, W), size=(config.resize, config.resize), mode="nearest").reshape(B, 1, config.resize, config.resize)
     else:
         Xr, yr = X, y
-    mask = (~torch.isnan(yr)).float()
-    y_obs = torch.where(mask > 0, yr, torch.full_like(yr, float("nan")))
+    # 12h-WINDOW assimilation (realistic): full past-12h obs series -> per-gauge
+    # window mean; target-time obs are NEVER used (no future leakage).
+    sp = Xr[:, :, 0]                     # [B,T,H,W] sparse obs series (ch0)
+    vm = Xr[:, :, 1].clamp(0, 1)         # [B,T,H,W] validity (ch1)
+    y_obs = torch.full_like(yr, float("nan"))
+    for i in range(B):
+        oy, ox = torch.where(~torch.isnan(yr[i, 0]))
+        for (a, b) in zip(oy, ox):
+            vals = sp[i, :, a, b][vm[i, :, a, b] > 0]
+            if vals.numel():
+                y_obs[i, 0, a, b] = vals.mean()
+    mask = (~torch.isnan(y_obs)).float()
     lead = torch.full((B,), float(config.lead_time if hasattr(config, "lead_time") else 8.0))
     print(f"test samples: {B} | {config.resize}x{config.resize} | ensemble={config.ensemble} steps={config.sample_steps}")
 

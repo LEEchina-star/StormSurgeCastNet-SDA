@@ -31,10 +31,14 @@ def run(Xc, assim=None):
     pred=np.zeros((B,H,W),np.float32)
     mask_cur=None; y_cur=None
     if assim=="current":
+        # 12h-window assimilation: full obs series -> per-gauge window mean
+        sp=Xc[:,:,0]; vm=Xc[:,:,1].clamp(0,1)
         cur=torch.full(y.shape,float("nan"))
         for i in range(B):
-            oy,ox=np.where(~np.isnan(y[i,0]))
-            for (a,b) in zip(oy,ox): cur[i,0,a,b]=Xc[i,-1,0,a,b]
+            oy,ox=torch.where(~torch.isnan(y[i,0]))
+            for (a,b) in zip(oy,ox):
+                vals=sp[i,:,a,b][vm[i,:,a,b]>0]
+                if vals.numel(): cur[i,0,a,b]=vals.mean()
         mask_cur=(~torch.isnan(cur)).float(); y_cur=cur
     for i in range(0,B,4):
         idx=slice(i,min(i+4,B))

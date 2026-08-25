@@ -148,16 +148,20 @@ def main():
                 break
             n_val += X.shape[0]
             X, y, yg, lead = X.to(device), y.to(device), yg.to(device), lead.to(device)
-            # REALISTIC data assimilation: only the CURRENT observation (t0, the
-            # last input frame = the most recent obs inside the past-12h window)
-            # is assimilated; target-time obs are NEVER used (no future leakage).
-            cur = torch.full_like(y, float("nan"))
+            # 12h-WINDOW assimilation: EVERY frame of the past-12h observation
+            # series enters the likelihood (per-gauge window mean over valid
+            # frames); target-time obs are NEVER used (no future leakage).
+            sp = X[:, :, 0]                     # [B,T,H,W] sparse obs series (ch0)
+            vm = X[:, :, 1].clamp(0, 1)         # [B,T,H,W] validity (ch1)
+            y_win = torch.full_like(y, float("nan"))
             for bi in range(X.shape[0]):
                 oy, ox = torch.where(~torch.isnan(y[bi]))
                 for (a, b) in zip(oy, ox):
-                    cur[bi, 0, a, b] = X[bi, -1, 0, a, b]
-            mask_cur = (~torch.isnan(cur)).float()
-            out = m.sample_posterior(X, lead, y=cur, mask=mask_cur, R=max(config.obs_noise, 1e-3),
+                    vals = sp[bi, :, a, b][vm[bi, :, a, b] > 0]
+                    if vals.numel():
+                        y_win[bi, 0, a, b] = vals.mean()
+            mask_win = (~torch.isnan(y_win)).float()
+            out = m.sample_posterior(X, lead, y=y_win, mask=mask_win, R=max(config.obs_noise, 1e-3),
                                      steps=steps, guidance=config.sda_guidance, ensemble=ens,
                                      sigma_max=config.sigma_max, sigma_min=config.sigma_min, seed=0,
                                      device=sample_dev, like_mode=like_mode, sampler="ode")
