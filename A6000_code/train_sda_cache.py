@@ -169,7 +169,7 @@ def main():
             vm = X[:, :, 1].clamp(0, 1)         # [B,T,H,W] validity (ch1)
             y_win = torch.full_like(y, float("nan"))
             for bi in range(X.shape[0]):
-                oy, ox = torch.where(~torch.isnan(y[bi]))
+                oy, ox = torch.where(~torch.isnan(y[bi, 0]))
                 for (a, b) in zip(oy, ox):
                     vals = sp[bi, :, a, b][vm[bi, :, a, b] > 0]
                     if vals.numel():
