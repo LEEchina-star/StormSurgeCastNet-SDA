@@ -148,9 +148,16 @@ def main():
                 break
             n_val += X.shape[0]
             X, y, yg, lead = X.to(device), y.to(device), yg.to(device), lead.to(device)
-            mask = (~torch.isnan(y)).float()
-            y_obs = torch.where(mask > 0, y, torch.full_like(y, float("nan")))
-            out = m.sample_posterior(X, lead, y=y_obs, mask=mask, R=max(config.obs_noise, 1e-3),
+            # REALISTIC data assimilation: only the CURRENT observation (t0, the
+            # last input frame = the most recent obs inside the past-12h window)
+            # is assimilated; target-time obs are NEVER used (no future leakage).
+            cur = torch.full_like(y, float("nan"))
+            for bi in range(X.shape[0]):
+                oy, ox = torch.where(~torch.isnan(y[bi]))
+                for (a, b) in zip(oy, ox):
+                    cur[bi, 0, a, b] = X[bi, -1, 0, a, b]
+            mask_cur = (~torch.isnan(cur)).float()
+            out = m.sample_posterior(X, lead, y=cur, mask=mask_cur, R=max(config.obs_noise, 1e-3),
                                      steps=steps, guidance=config.sda_guidance, ensemble=ens,
                                      sigma_max=config.sigma_max, sigma_min=config.sigma_min, seed=0,
                                      device=sample_dev, like_mode=like_mode, sampler="ode")
