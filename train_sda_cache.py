@@ -140,7 +140,7 @@ def main():
         m = ema
         steps = max(config.sample_steps, 25); ens = min(config.ensemble, 2)
         sample_dev = None
-        like_mode = "replace" if device.type == "mps" else "autograd"
+        like_mode = "replace"   # first-order SDA guidance (same as official test protocol)
         crps, cov, rmse = [], [], []
         n_val = 0
         for X, y, yg, lead in va_loader:

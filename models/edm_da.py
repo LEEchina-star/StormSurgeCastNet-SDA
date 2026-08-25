@@ -479,10 +479,11 @@ class EDMDataAssimilation(nn.Module):
                     else:
                         # exact gradient through the Tweedie estimate (SDA Eq. 10)
                         with torch.enable_grad():
-                            x0_hat = self.denoise(x, sig, c, lead)
+                            xg = x.detach().requires_grad_(True)   # leaf var for exact SDA gradient
+                            x0_hat = self.denoise(xg, sig, c, lead)
                             resid = (y_obs - x0_hat * obs_mask)
                             g = torch.autograd.grad(
-                                0.5 * ((resid ** 2) * inv_var.view(-1, 1, 1, 1)).mean(), x)[0]
+                                0.5 * ((resid ** 2) * inv_var.view(-1, 1, 1, 1)).mean(), xg)[0]
                             x0_hat = x0_hat.detach()
                 else:
                     with torch.no_grad():
