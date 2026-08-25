@@ -148,6 +148,7 @@ def main():
                 break
             n_val += X.shape[0]
             X, y, yg, lead = X.to(device), y.to(device), yg.to(device), lead.to(device)
+            mask = (~torch.isnan(y)).float()   # target-gauge scoring mask (unchanged)
             # 12h-WINDOW assimilation: EVERY frame of the past-12h observation
             # series enters the likelihood (per-gauge window mean over valid
             # frames); target-time obs are NEVER used (no future leakage).
