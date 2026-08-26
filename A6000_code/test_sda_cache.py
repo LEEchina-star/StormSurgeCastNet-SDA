@@ -25,19 +25,13 @@ from util.model_utils import get_model
 
 def main():
     parser = create_parser(mode="test")
-    parser.add_argument("--resize", type=int, default=0, help="0 = keep 256x256 (paper protocol); 128 only for quick runs")
+    parser.add_argument("--resize", type=int, default=128)
     parser.add_argument("--checkpoint", default="results_sda/cmp_sda_128_v4/best_sda.pth.tar")
     parser.add_argument("--out", default="results_sda/test_report")
     config = utils.str2list(parser.parse_args(), list_args=["encoder_widths", "decoder_widths", "out_conv"])
     config.model = "edm_da"
-    if torch.cuda.is_available():
-        config.device = "cuda"
-    else:
-        _mps = getattr(torch.backends, "mps", None)
-        if _mps is not None and _mps.is_available():
-            config.device = "mps"
-        else:
-            config.device = "cpu"
+    if not torch.cuda.is_available() and torch.backends.mps.is_available():
+        config.device = "mps"
     device = torch.device(config.device)
     print(f"device: {device}")
 
@@ -73,19 +67,28 @@ def main():
         yr = F.interpolate(y.reshape(B, 1, H, W), size=(config.resize, config.resize), mode="nearest").reshape(B, 1, config.resize, config.resize)
     else:
         Xr, yr = X, y
-    # RECENCY-WEIGHTED 12h-window assimilation: all T frames participate, weight
-    # grows linearly toward the latest frame (1..T); target-time obs NEVER used.
-    t_w = torch.arange(T, device=Xr.device, dtype=torch.float32) + 1.0
+    # TREND-AWARE 12h-window assimilation: the likelihood anchor is the
+    # recency-weighted window mean PLUS the linear trend of the past-12h obs
+    # extrapolated to the target time (t0 + lead). All T frames participate;
+    # target-time obs are NEVER used (no future leakage).
+    tt = torch.arange(T, device=Xr.device, dtype=torch.float32)
     sp = Xr[:, :, 0]                     # [B,T,H,W] sparse obs series (ch0)
     vm = Xr[:, :, 1].clamp(0, 1)         # [B,T,H,W] validity (ch1)
+    lead_f = torch.full((B,), float(config.lead_time if hasattr(config, "lead_time") else 8.0))
     y_obs = torch.full_like(yr, float("nan"))
     for i in range(B):
         oy, ox = torch.where(~torch.isnan(yr[i, 0]))
         for (a, b) in zip(oy, ox):
             v = vm[i, :, a, b] > 0
-            if v.any():
-                w = t_w[v]
-                y_obs[i, 0, a, b] = (sp[i, :, a, b][v] * w).sum() / w.sum()
+            if v.sum() >= 2:
+                ts = sp[i, :, a, b][v].float()
+                tv = tt[v].float()
+                t_mean, s_mean = tv.mean(), ts.mean()
+                slope = ((tv - t_mean) * (ts - s_mean)).sum() / ((tv - t_mean) ** 2).sum()
+                t_tgt = float(T - 1) + float(lead_f[i])
+                y_obs[i, 0, a, b] = s_mean + slope * (t_tgt - t_mean)
+            elif v.any():
+                y_obs[i, 0, a, b] = sp[i, :, a, b][v].mean()
     mask = (~torch.isnan(y_obs)).float()
     lead = torch.full((B,), float(config.lead_time if hasattr(config, "lead_time") else 8.0))
     print(f"test samples: {B} | {config.resize}x{config.resize} | ensemble={config.ensemble} steps={config.sample_steps}")
