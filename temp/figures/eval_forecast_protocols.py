@@ -39,14 +39,17 @@ def run(c_override=None, y_in=None, mask_in=None):
         pred[i:i+4]=o["mean"].cpu()[:,0]
     return pred
 
-# 12h-WINDOW assimilation: full past-12h obs series -> per-gauge window mean
+# RECENCY-WEIGHTED 12h-window assimilation: all T frames, weight 1..T (linear)
+tw=torch.arange(T,device=X.device,dtype=torch.float32)+1.0
 sp=X[:,:,0]; vm=X[:,:,1].clamp(0,1)
 cur=torch.full(y.shape, float("nan"))
 for i in range(B):
     oy,ox=torch.where(~torch.isnan(y[i,0]))
     for (a,b) in zip(oy,ox):
-        vals=sp[i,:,a,b][vm[i,:,a,b]>0]
-        if vals.numel(): cur[i,0,a,b]=vals.mean()
+        v=vm[i,:,a,b]>0
+        if v.any():
+            w=tw[v]
+            cur[i,0,a,b]=(sp[i,:,a,b][v]*w).sum()/w.sum()
 mask_c=(~torch.isnan(cur)).float()
 
 t0=time.time()

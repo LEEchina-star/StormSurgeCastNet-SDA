@@ -67,17 +67,19 @@ def main():
         yr = F.interpolate(y.reshape(B, 1, H, W), size=(config.resize, config.resize), mode="nearest").reshape(B, 1, config.resize, config.resize)
     else:
         Xr, yr = X, y
-    # 12h-WINDOW assimilation (realistic): full past-12h obs series -> per-gauge
-    # window mean; target-time obs are NEVER used (no future leakage).
+    # RECENCY-WEIGHTED 12h-window assimilation: all T frames participate, weight
+    # grows linearly toward the latest frame (1..T); target-time obs NEVER used.
+    t_w = torch.arange(T, device=Xr.device, dtype=torch.float32) + 1.0
     sp = Xr[:, :, 0]                     # [B,T,H,W] sparse obs series (ch0)
     vm = Xr[:, :, 1].clamp(0, 1)         # [B,T,H,W] validity (ch1)
     y_obs = torch.full_like(yr, float("nan"))
     for i in range(B):
         oy, ox = torch.where(~torch.isnan(yr[i, 0]))
         for (a, b) in zip(oy, ox):
-            vals = sp[i, :, a, b][vm[i, :, a, b] > 0]
-            if vals.numel():
-                y_obs[i, 0, a, b] = vals.mean()
+            v = vm[i, :, a, b] > 0
+            if v.any():
+                w = t_w[v]
+                y_obs[i, 0, a, b] = (sp[i, :, a, b][v] * w).sum() / w.sum()
     mask = (~torch.isnan(y_obs)).float()
     lead = torch.full((B,), float(config.lead_time if hasattr(config, "lead_time") else 8.0))
     print(f"test samples: {B} | {config.resize}x{config.resize} | ensemble={config.ensemble} steps={config.sample_steps}")
