@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--resize", type=int, default=128)
     parser.add_argument("--checkpoint", default="results_sda/cmp_sda_128_v4/best_sda.pth.tar")
     parser.add_argument("--out", default="results_sda/test_report")
+    parser.add_argument("--save_samples", action="store_true",
+                        help="save raw ensemble samples to <out>/samples.npz for offline spread calibration")
     config = utils.str2list(parser.parse_args(), list_args=["encoder_widths", "decoder_widths", "out_conv"])
     config.model = "edm_da"
     if not torch.cuda.is_available() and torch.backends.mps.is_available():
@@ -97,6 +99,7 @@ def main():
     os.makedirs(config.out, exist_ok=True)
     rmse, mae, crps, cov, pit_mean, spread, skill = [], [], [], [], [], [], []
     per_sample = []
+    all_samples = []
     t0 = time.time()
     for i in range(0, B, 4):
         idx = slice(i, min(i + 4, B))
@@ -128,6 +131,8 @@ def main():
             crps.append(mets_r["crps"]); cov.append(mets_r["coverage_90"])
             pit_mean.append(mets_r["pit_mean"]); spread.append(mets_r["spread"]); skill.append(mets_r["skill"])
             per_sample.append(mets_r)
+        if getattr(config, "save_samples", False):
+            all_samples.append(out["samples"].cpu().numpy())   # [B,N,1,H,W]
         print(f"  batch {i}-{min(i+4,B)} done ({time.time()-t0:.0f}s)", flush=True)
 
     def cl(a):
@@ -147,6 +152,11 @@ def main():
         json.dump(report, f, indent=2)
     with open(os.path.join(config.out, "per_sample.json"), "w") as f:
         json.dump(per_sample, f, indent=2)
+    if getattr(config, "save_samples", False):
+        import numpy as _np
+        _np.savez(os.path.join(config.out, "samples.npz"),
+                  samples=_np.concatenate(all_samples))   # [B,N,1,H,W]
+        print("saved raw ensemble samples ->", os.path.join(config.out, "samples.npz"))
     print("\n================ TEST REPORT ================")
     for k, v in report.items():
         if k != "config":
