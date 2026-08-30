@@ -55,14 +55,13 @@ mask_c=(~torch.isnan(cur)).float()
 t0=time.time()
 p_pri=run(None,None,None);                             print(f"prior done {time.time()-t0:.0f}s",flush=True)
 t0=time.time()
-p_cur=run(None,cur,mask_c);                            print(f"assim_current done {time.time()-t0:.0f}s",flush=True)
-t0=time.time()
-p_fut=run(None,y_obs_f,mask_f);                        print(f"assim_future done {time.time()-t0:.0f}s",flush=True)
+p_cur=run(None,cur,mask_c);                            print(f"assim_window(weighted) done {time.time()-t0:.0f}s",flush=True)
 # densification: remove target history from input sparse (set 0) + no assimilation
 X0=X[:,:,0].clone()
 X0[X0!=0]=0.0
 t0=time.time()
 p_den=run(X0,None,None);                               print(f"densification done {time.time()-t0:.0f}s",flush=True)
+p_fut=np.full_like(p_pri, float("nan"))   # cheat protocol removed
 
 def mae(pred):
     out=[]
@@ -73,8 +72,8 @@ def mae(pred):
 
 print("\n=== SDA-Diff 256 — forecast protocols (45 held-out gauges, metres) ===")
 print(f"  prior (no assim)        : {mae(p_pri):.4f} m")
-print(f"  assim WINDOW obs (12h)  : {mae(p_cur):.4f} m   <- realistic forecast")
-print(f"  assim FUTURE obs (old)  : {mae(p_fut):.4f} m   <- previous 'cheat'")
+print(f"  assim WINDOW (weighted)  : {mae(p_cur):.4f} m   <- realistic forecast")
+print(f"  assim FUTURE obs (old)  : {mae(p_fut):.4f} m   <- removed")
 print(f"  densification (E2)      : {mae(p_den):.4f} m")
 np.savez("temp/figures/protocols.npz", p_pri=p_pri,p_cur=p_cur,p_fut=p_fut,p_den=p_den)
 print("saved protocols.npz")
